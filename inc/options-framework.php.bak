@@ -1,0 +1,849 @@
+<?php
+/*
+Description: A framework for building theme options.
+Author: Devin Price
+Author URI: http://www.wptheming.com
+License: GPLv2
+Version: 1.6
+*/
+
+/*
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+*/
+
+/* If the user can't edit theme options, no use running this plugin */
+
+add_action( 'init', 'optionsframework_rolescheck' );
+
+function optionsframework_rolescheck () {
+	if ( current_user_can( 'edit_theme_options' ) ) {
+		// If the user can edit theme options, let the fun begin!
+		add_action( 'admin_menu', 'optionsframework_add_page');
+		add_action( 'admin_init', 'optionsframework_init' );
+		add_action( 'wp_before_admin_bar_render', 'optionsframework_adminbar' );
+	}
+}
+
+/* Loads the file for option sanitization */
+
+add_action( 'init', 'optionsframework_load_sanitization' );
+
+function optionsframework_load_sanitization() {
+	require_once dirname( __FILE__ ) . '/options-sanitize.php';
+}
+
+/*
+ * Creates the settings in the database by looping through the array
+ * we supplied in options.php.  This is a neat way to do it since
+ * we won't have to save settings for headers, descriptions, or arguments.
+ *
+ * Read more about the Settings API in the WordPress codex:
+ * http://codex.wordpress.org/Settings_API
+ *
+ */
+
+function optionsframework_init() {
+
+	// Include the required files
+	require_once dirname( __FILE__ ) . '/options-interface.php';
+	require_once dirname( __FILE__ ) . '/options-media-uploader.php';
+
+	// Optionally Loads the options file from the theme
+	$location = apply_filters( 'options_framework_location', array( 'options.php' ) );
+	$optionsfile = locate_template( $location );
+
+	// Load settings
+	$optionsframework_settings = get_option('optionsframework' );
+
+	// Updates the unique option id in the database if it has changed
+	if ( function_exists( 'optionsframework_option_name' ) ) {
+		optionsframework_option_name();
+	}
+	elseif ( has_action( 'optionsframework_option_name' ) ) {
+		do_action( 'optionsframework_option_name' );
+	}
+	// If the developer hasn't explicitly set an option id, we'll use a default
+	else {
+		$default_themename = get_option( 'stylesheet' );
+		$default_themename = preg_replace("/\W/", "_", strtolower($default_themename) );
+		$default_themename = 'optionsframework_' . $default_themename;
+		if ( isset( $optionsframework_settings['id'] ) ) {
+			if ( $optionsframework_settings['id'] == $default_themename ) {
+				// All good, using default theme id
+			} else {
+				$optionsframework_settings['id'] = $default_themename;
+				update_option( 'optionsframework', $optionsframework_settings );
+			}
+		}
+		else {
+			$optionsframework_settings['id'] = $default_themename;
+			update_option( 'optionsframework', $optionsframework_settings );
+		}
+	}
+
+	// If the option has no saved data, load the defaults
+	if ( ! get_option( $optionsframework_settings['id'] ) ) {
+		optionsframework_setdefaults();
+	}
+
+	// Registers the settings fields and callback
+	register_setting( 'optionsframework', $optionsframework_settings['id'], 'optionsframework_validate' );
+	// Change the capability required to save the 'optionsframework' options group.
+	add_filter( 'option_page_capability_optionsframework', 'optionsframework_page_capability' );
+}
+
+/**
+ * Ensures that a user with the 'edit_theme_options' capability can actually set the options
+ * See: http://core.trac.wordpress.org/ticket/14365
+ *
+ * @param string $capability The capability used for the page, which is manage_options by default.
+ * @return string The capability to actually use.
+ */
+
+function optionsframework_page_capability( $capability ) {
+	return 'edit_theme_options';
+}
+
+/*
+ * Adds default options to the database if they aren't already present.
+ * May update this later to load only on plugin activation, or theme
+ * activation since most people won't be editing the options.php
+ * on a regular basis.
+ *
+ * http://codex.wordpress.org/Function_Reference/add_option
+ *
+ */
+
+function optionsframework_setdefaults() {
+
+	$optionsframework_settings = get_option( 'optionsframework' );
+
+	// Gets the unique option id
+	$option_name = $optionsframework_settings['id'];
+
+	/*
+	 * Each theme will hopefully have a unique id, and all of its options saved
+	 * as a separate option set.  We need to track all of these option sets so
+	 * it can be easily deleted if someone wishes to remove the plugin and
+	 * its associated data.  No need to clutter the database.
+	 *
+	 */
+
+	if ( isset( $optionsframework_settings['knownoptions'] ) ) {
+		$knownoptions =  $optionsframework_settings['knownoptions'];
+		if ( !in_array( $option_name, $knownoptions ) ) {
+			array_push( $knownoptions, $option_name );
+			$optionsframework_settings['knownoptions'] = $knownoptions;
+			update_option( 'optionsframework', $optionsframework_settings );
+		}
+	} else {
+		$newoptionname = array( $option_name );
+		$optionsframework_settings['knownoptions'] = $newoptionname;
+		update_option( 'optionsframework', $optionsframework_settings );
+	}
+
+	// Gets the default options data from the array in options.php
+	$options =& _optionsframework_options();
+
+	// If the options haven't been added to the database yet, they are added now
+	$values = of_get_default_values();
+
+	if ( isset( $values ) ) {
+		add_option( $option_name, $values ); // Add option with default settings
+	}
+}
+
+/* Define menu options (still limited to appearance section)
+ *
+ * Examples usage:
+ *
+ * add_filter( 'optionsframework_menu', function($menu) {
+ *     $menu['page_title'] = 'Hello Options';
+ *	   $menu['menu_title'] = 'Hello Options';
+ *     return $menu;
+ * });
+ */
+
+function optionsframework_menu_settings() {
+
+	$menu = array(
+		'page_title' => __( '主题设置', 'optionsframework'),
+		'menu_title' => __('主题设置', 'optionsframework'),
+		'capability' => 'edit_theme_options',
+		'menu_slug' => 'options-framework',
+		'callback' => 'optionsframework_page'
+	);
+
+	return apply_filters( 'optionsframework_menu', $menu );
+}
+
+/* Add a subpage called "Theme Options" to the appearance menu. */
+
+function optionsframework_add_page() {
+
+	$menu = optionsframework_menu_settings();
+	$of_page = add_theme_page( $menu['page_title'], $menu['menu_title'], $menu['capability'], $menu['menu_slug'], $menu['callback'] );
+
+	// Load the required CSS and javscript
+	add_action( 'admin_enqueue_scripts', 'optionsframework_load_scripts' );
+	add_action( 'admin_print_styles-' . $of_page, 'optionsframework_load_styles' );
+}
+
+/* Loads the CSS */
+
+function optionsframework_load_styles() {
+
+	// wp_enqueue_style( 'amazeui', 'http://cdn.amazeui.org/amazeui/2.6.2/css/amazeui.min.css' );
+	wp_enqueue_style( 'uikit', OPTIONS_FRAMEWORK_DIRECTORY.'css/uikit.min.css' );
+	wp_enqueue_style( 'optionsframework', OPTIONS_FRAMEWORK_DIRECTORY.'css/optionsframework.css' );
+	if ( !wp_style_is( 'wp-color-picker','registered' ) ) {
+		wp_register_style( 'wp-color-picker', OPTIONS_FRAMEWORK_DIRECTORY.'css/color-picker.min.css' );
+	}
+	wp_enqueue_style( 'wp-color-picker' );
+}
+
+/* Loads the javascript */
+
+function optionsframework_load_scripts( $hook ) {
+
+	$menu = optionsframework_menu_settings();
+
+	if ( 'appearance_page_' . $menu['menu_slug'] != $hook )
+        return;
+
+	// Enqueue colorpicker scripts for versions below 3.5 for compatibility
+	if ( !wp_script_is( 'wp-color-picker', 'registered' ) ) {
+		wp_register_script( 'iris', OPTIONS_FRAMEWORK_DIRECTORY . 'js/iris.min.js', array( 'jquery-ui-draggable', 'jquery-ui-slider', 'jquery-touch-punch' ), false, 1 );
+		wp_register_script( 'wp-color-picker', OPTIONS_FRAMEWORK_DIRECTORY . 'js/color-picker.min.js', array( 'jquery', 'iris' ) );
+		$colorpicker_l10n = array(
+			'clear' => __( 'Clear','options_framework_theme' ),
+			'defaultString' => __( 'Default', 'options_framework_theme' ),
+			'pick' => __( 'Select Color', 'options_framework_theme' )
+		);
+		wp_localize_script( 'wp-color-picker', 'wpColorPickerL10n', $colorpicker_l10n );
+	}
+
+	// Enqueue custom option panel JS
+	wp_enqueue_script( 'options-custom', OPTIONS_FRAMEWORK_DIRECTORY . 'js/options-custom.js', array( 'jquery','wp-color-picker' ) );
+
+	// Inline scripts from options-interface.php
+	add_action( 'admin_head', 'of_admin_head' );
+}
+
+function of_admin_head() {
+	// Hook to add custom scripts
+	do_action( 'optionsframework_custom_scripts' );
+}
+
+/*
+ * Builds out the options panel.
+ *
+ * If we were using the Settings API as it was likely intended we would use
+ * do_settings_sections here.  But as we don't want the settings wrapped in a table,
+ * we'll call our own custom optionsframework_fields.  See options-interface.php
+ * for specifics on how each individual field is generated.
+ *
+ * Nonces are provided using the settings_fields()
+ *
+ */
+
+if ( !function_exists( 'optionsframework_page' ) ) :
+function optionsframework_page() { ?>
+
+	<div id="optionsframework-wrap" class="wrap uk-grid uk-grid-collapse">
+    <?php screen_icon( 'themes' ); ?>
+
+    <div class="uk-width-medium-1-5 uk-panel-box">
+ 		<div id="logo">
+ 			<img  src="<?php echo OPTIONS_FRAMEWORK_DIRECTORY.'images/logo.svg'?>">
+ 			<input type="hidden" value="1">
+ 		</div>
+    	<ul class="uk-nav nav-tab-wrapper uk-nav-side">
+	        <?php echo optionsframework_tabs(); ?>
+	        
+        </ul>
+        <ul class="uk-nav uk-nav-side">
+        	<li class="uk-nav-divider"></li>
+        	<li><a href="http://qzhai.net/center/" target="_blank"><i class="uk-icon-quote-left"></i> 官方社区</a></li>
+	        <li><a href="http://qzhai.net/" target="_blank"> <i class="uk-icon-home"></i> 衫小寨</a></li>
+        </ul>
+       
+	    <?php do_action( 'optionsframework_after' ); ?>
+    </div>
+    <div id="optionsframework-metabox" class="metabox-holder uk-width-medium-4-5">
+	    <div id="optionsframework" class="postbox">
+    	<?php settings_errors( 'options-framework' ); ?>
+			<form action="options.php" method="post" class="uk-form">
+			<?php settings_fields( 'optionsframework' ); ?>
+			<?php optionsframework_fields(); /* Settings */ ?>
+			<div id="optionsframework-submit">
+				<button type="submit" class="uk-button uk-button-primary uk-float-right" name="update" ><?php esc_attr_e( '保存设置', 'options_framework_theme' ); ?></button>
+				<button type="submit" class="uk-button " name="reset"onclick="return confirm( '<?php print esc_js( __( '如果单击“确定”会导致之前所有的设置都丢失，确定要这样做吗？', 'options_framework_theme' ) ); ?>' );" /><?php esc_attr_e( '恢复默认（全部选项）', 'options_framework_theme' ); ?></button>
+				<div class="clear"></div>
+			</div>
+			</form>
+		</div> <!-- / #container -->
+	</div>
+
+	
+	</div> <!-- / .wrap -->
+
+<?php
+}
+endif;
+
+/**
+ * Validate Options.
+ *
+ * This runs after the submit/reset button has been clicked and
+ * validates the inputs.
+ *
+ * @uses $_POST['reset'] to restore default options
+ */
+function optionsframework_validate( $input ) {
+
+
+
+	/*
+	 * Restore Defaults.
+	 *
+	 * In the event that the user clicked the "Restore Defaults"
+	 * button, the options defined in the theme's options.php
+	 * file will be added to the option for the active theme.
+	 */
+
+	if ( isset( $_POST['reset'] ) ) {
+		add_settings_error( 'options-framework', 'restore_defaults', __( '已经恢复默认选项.', 'options_framework_theme' ), 'updated fade' );
+		return of_get_default_values();
+	}
+
+	/*
+	 * Update Settings
+	 *
+	 * This used to check for $_POST['update'], but has been updated
+	 * to be compatible with the theme customizer introduced in WordPress 3.4
+	 */
+	
+
+	$clean = array();
+	$options =& _optionsframework_options();
+	foreach ( $options as $option ) {
+
+		if ( ! isset( $option['id'] ) ) {
+			continue;
+		}
+
+		if ( ! isset( $option['type'] ) ) {
+			continue;
+		}
+
+		$id = preg_replace( '/[^a-zA-Z0-9._\-]/', '', strtolower( $option['id'] ) );
+
+		// Set checkbox to false if it wasn't sent in the $_POST
+		if ( 'checkbox' == $option['type'] && ! isset( $input[$id] ) ) {
+			$input[$id] = false;
+		}
+
+		// Set each item in the multicheck to false if it wasn't sent in the $_POST
+		if ( 'multicheck' == $option['type'] && ! isset( $input[$id] ) ) {
+			foreach ( $option['options'] as $key => $value ) {
+				$input[$id][$key] = false;
+			}
+		}
+
+		// For a value to be submitted to database it must pass through a sanitization filter
+		if ( has_filter( 'of_sanitize_' . $option['type'] ) ) {
+			$clean[$id] = apply_filters( 'of_sanitize_' . $option['type'], $input[$id], $option );
+		}
+	}
+
+	// Hook to run after validation
+	do_action( 'optionsframework_after_validate', $clean );
+
+	return $clean;
+}
+
+/**
+ * Display message when options have been saved
+ */
+
+function optionsframework_save_options_notice() {
+	add_settings_error( 'options-framework', 'save_options', __( '设置已保存.', 'options_framework_theme' ), 'updated fade' );
+}
+
+add_action( 'optionsframework_after_validate', 'optionsframework_save_options_notice' );
+
+/**
+ * Format Configuration Array.
+ *
+ * Get an array of all default values as set in
+ * options.php. The 'id','std' and 'type' keys need
+ * to be defined in the configuration array. In the
+ * event that these keys are not present the option
+ * will not be included in this function's output.
+ *
+ * @return    array     Rey-keyed options configuration array.
+ *
+ * @access    private
+ */
+
+function of_get_default_values() {
+	$output = array();
+	$config =& _optionsframework_options();
+	foreach ( (array) $config as $option ) {
+		if ( ! isset( $option['id'] ) ) {
+			continue;
+		}
+		if ( ! isset( $option['std'] ) ) {
+			continue;
+		}
+		if ( ! isset( $option['type'] ) ) {
+			continue;
+		}
+		if ( has_filter( 'of_sanitize_' . $option['type'] ) ) {
+			$output[$option['id']] = apply_filters( 'of_sanitize_' . $option['type'], $option['std'], $option );
+		}
+	}
+	return $output;
+}
+
+function authcode($string, $operation = 'DECODE', $key = '', $expiry = 0) {
+	$ckey_length = 4;
+	$key = md5($key ? $key : $GLOBALS['discuz_auth_key']);
+	$keya = md5(substr($key, 0, 16));
+	$keyb = md5(substr($key, 16, 16));
+	$keyc = $ckey_length ? ($operation == 'DECODE' ? substr($string, 0, $ckey_length):
+		substr(md5(microtime()), -$ckey_length)) : '';
+	$cryptkey = $keya.md5($keya.$keyc);
+	$key_length = strlen($cryptkey);
+	$string = $operation == 'DECODE' ? base64_decode(substr($string, $ckey_length)) :
+		sprintf('%010d', $expiry ? $expiry + time() : 0).substr(md5($string.$keyb), 0, 16).$string;
+	$string_length = strlen($string);
+	$result = '';
+	$box = range(0, 255);
+	$rndkey = array();
+	for($i = 0; $i <= 255; $i++) {
+		$rndkey[$i] = ord($cryptkey[$i % $key_length]);
+	}
+	for($j = $i = 0; $i < 256; $i++) {
+		$j = ($j + $box[$i] + $rndkey[$i]) % 256;
+		$tmp = $box[$i];
+		$box[$i] = $box[$j];
+		$box[$j] = $tmp;
+	}
+	for($a = $j = $i = 0; $i < $string_length; $i++) {
+		$a = ($a + 1) % 256;
+		$j = ($j + $box[$a]) % 256;
+		$tmp = $box[$a];
+		$box[$a] = $box[$j];
+		$box[$j] = $tmp;
+		$result .= chr(ord($string[$i]) ^ ($box[($box[$a] + $box[$j]) % 256]));
+	}
+	if($operation == 'DECODE') {
+		if((substr($result, 0, 10) == 0 || substr($result, 0, 10) - time() > 0) &&
+			substr($result, 10, 16) == substr(md5(substr($result, 26).$keyb), 0, 16)) {
+			return substr($result, 26);
+		} else {
+			return '';
+		}
+	} else {
+		return $keyc.str_replace('=', '', base64_encode($result));
+	}
+}
+
+function parsing($key){
+	$qzhai = authcode($key,'DECODE','qzhai',0);
+	if($qzhai == ''){
+		$r['state'] = false;
+		$r['err'] = '输入的激活码不正确！';
+		return $r;
+	}
+	$key = strtolower($qzhai);
+	$a = array('a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s','t','u','v','w','x','y','z');
+	$b = $key[6];
+	$uuu = substr($key,0,5);
+	$time = substr($key,7,6);
+	if($_SERVER['SERVER_NAME'] == '127.0.0.1' or $_SERVER['SERVER_NAME'] == 'localhost'){
+		$url_initial = 'localhost';
+	}else{
+		$url_initial = $_SERVER['SERVER_NAME'];
+	}
+	$www = array('com','cn','net','org','gov');
+	$a_a = explode('.', $url_initial);
+	$r_r = array();
+	$r_r[] = array_pop($a_a);
+	$r_r[] = array_pop($a_a);
+	if(in_array($r_r[1], $www)){
+		$newcom = array_pop($a_a);
+		$r_r[1] = $newcom .'.'. $r_r[1];
+	}
+	$url = strtoupper(substr(md5($r_r[1].'.'.$r_r[0].'no7'.$b),10,6));
+	$key_url = '1';
+	foreach($a as $k => $v){
+		if($b == $v){
+			$num = $num2 = $k;
+			$mima = array();
+			for($i=0;$i<10;$i++){
+				if($num >= 26){
+					$num = 0;
+				}
+				$mima[$i] = $a[$num];
+				$mima_ot[$a[$num]] = $i;
+				$num += 2;
+			}
+		}
+	}
+	$data = array();
+	$data['url'] = '';
+	$data['time'] = time();
+	$data['key_time'] = mktime(23, 59, 59, $mima_ot[$time[2]]. $mima_ot[$time[3]], $mima_ot[$time[4]]. $mima_ot[$time[5]], '20'.$mima_ot[$time[0]]. $mima_ot[$time[1]]);
+	
+	$data['key_url'] = substr(md5($url),0,6);
+	$data['key_url2'] = substr($key,0,6);
+	if($data['key_url'] != $data['key_url2']){
+		$r['state'] = false;
+		$r['err'] = '激活码不正确！';
+		return $r;
+	}
+	if($data['time'] > $data['key_time']){
+		$r['state'] = false;
+		$r['err'] = '激活码已过期';
+		return $r;
+	}
+	$r['state'] = true;
+	$r['time'] = $data['key_time'] - time();
+	return $r;
+}
+
+function Q_is($key){
+		$keyps = strtoupper(substr(md5($_SERVER['SERVER_NAME'].'qzhai'),10,15));
+		$keys = 'QZHAI'.strtoupper(substr(md5($keyps.'think'),10,15));	
+		if($key == $keys){
+			$ttt = time() - 2722889;
+			if($ttt > 0){
+				$r['state'] = true;
+				$r['time'] = 'A';
+			}else{
+				$r['state'] = false;
+				$r['err'] = '非常抱歉由于系统升级，原来的激活码无效了，快来联系我换新版的激活码！';
+			}
+		}else {
+			$r = parsing($key); 
+		}
+		return $r;
+	
+	
+}
+/**
+ * Add Theme Options menu item to Admin Bar.
+ */
+
+function optionsframework_adminbar() {
+
+	global $wp_admin_bar;
+
+	$wp_admin_bar->add_menu( array(
+			'parent' => 'appearance',
+			'id' => 'of_theme_options',
+			'title' => __( '主题设置', 'options_framework_theme' ),
+			'href' => admin_url( 'themes.php?page=options-framework' )
+		));
+}
+
+/**
+ * Wrapper for optionsframework_options()
+ *
+ * Allows for manipulating or setting options via 'of_options' filter
+ * For example:
+ *
+ * <code>
+ * add_filter('of_options', function($options) {
+ *     $options[] = array(
+ *         'name' => 'Input Text Mini',
+ *         'desc' => 'A mini text input field.',
+ *         'id' => 'example_text_mini',
+ *         'std' => 'Default',
+ *         'class' => 'mini',
+ *         'type' => 'text'
+ *     );
+ *
+ *     return $options;
+ * });
+ * </code>
+ *
+ * Also allows for setting options via a return statement in the
+ * options.php file.  For example (in options.php):
+ *
+ * <code>
+ * return array(...);
+ * </code>
+ *
+ * @return array (by reference)
+ */
+function &_optionsframework_options() {
+	static $options = null;
+
+	if ( !$options ) {
+		// Load options from options.php file (if it exists)
+		$location = apply_filters( 'options_framework_location', array('options.php') );
+		if ( $optionsfile = locate_template( $location ) ) {
+			$maybe_options = require_once $optionsfile;
+			if ( is_array($maybe_options) ) {
+				$options = $maybe_options;
+			} else if ( function_exists( 'optionsframework_options' ) ) {
+				$options = optionsframework_options();
+			}
+		}
+
+		// Allow setting/manipulating options via filters
+		$options = apply_filters('of_options', $options);
+	}
+
+	return $options;
+}
+
+/**
+ * Get Option.
+ *
+ * Helper function to return the theme option value.
+ * If no value has been saved, it returns $default.
+ * Needed because options are saved as serialized strings.
+ */
+
+if ( ! function_exists( 'of_get' ) ) {
+
+	function of_get( $name, $default = false ) {
+		$config = get_option( 'optionsframework' );
+
+		if ( ! isset( $config['id'] ) ) {
+			return $default;
+		}
+
+		$options = get_option( $config['id'] );
+
+		if ( isset( $options[$name] ) ) {
+			return $options[$name];
+		}
+
+		return $default;
+	}
+}
+
+function option_s($kk){
+	$notice_array = array(
+		'info' => __('一般', 'options_framework_theme'),
+		'success' => __('成功', 'options_framework_theme'),
+		'warning' => __('警告', 'options_framework_theme'),
+		'danger' => __('危险', 'options_framework_theme'),
+	); 
+	$options_categories = array();
+	$options_categories_obj = get_categories();
+	foreach ($options_categories_obj as $category) {
+		$options_categories[$category->cat_ID] = $category->cat_name;
+	}
+	$options = array();
+	if($kk){
+		$options[] = array(
+		'name' => __('主题设置', 'options_framework_theme'),
+		'icon' => 'gear',
+		'type' => 'heading');
+
+		$options[] = array(
+			'name' => __('启用个人详情', 'options_framework_theme'),
+			'desc' =>'勾选后点击头像显示详情',
+			'id' => 'is_details',
+			'std' => '0',
+			'type' => 'checkbox');
+
+		$options[] = array(
+		'name' => __('个人详情图', 'options_framework_theme'),
+		'desc' => __('全站头像显示', 'options_framework_theme'),
+		'id' => 'details_bg',
+		'type' => 'upload');
+
+		$options[] = array(
+			'name' => __('详情内容', 'options_framework_theme'),
+			'desc' => '',
+			'id' => 'details',
+			'type' => 'editor',
+			'settings' => $wp_editor_settings );
+
+		$options[] = array(
+			'name' => __('大图模式', 'options_framework_theme'),
+			'desc' =>'勾选后列表启用大图方式显示',
+			'id' => 'loop_img',
+			'std' => '0',
+			'type' => 'checkbox');
+
+		if ( $options_categories ) {
+			$options[] = array(
+				'name' => __('展示模块', 'options_framework_theme'),
+				'desc' => __('勾选使用展示模板显示内容的分类[当被勾选后，首页将不会显示此分类下的内容，设置后必须设置特色图像]', 'options_framework_theme'),
+				'id' => 'book_list',
+				'std' => '', 
+				'type' => 'multicheck',
+				'options' => $options_categories);
+		}
+
+		$options[] = array(
+			'name' => __('启用小工具', 'options_framework_theme'),
+			'desc' =>'勾选后启用小工具',
+			'id' => 'is_widget',
+			'std' => '0',
+			'type' => 'checkbox');
+
+		if(of_get('is_widget')){ 
+			$options[] = array(
+				'name' => __('开启移动端小工具', 'options_framework_theme'),
+				'desc' =>'勾选后开启移动端小工具',
+				'id' => 'is_widget_mobile',
+				'std' => '1',
+				'type' => 'checkbox');
+			}
+		 $options[] = array(
+			'name' => __('是否启用回复邮件通知', 'options_framework_theme'),
+			'desc' => __('勾选启用（需要主机支持发送邮件）', 'options_framework_theme'),
+			'id' => 'is_email',
+			'std' => '0',
+			'type' => 'checkbox');
+
+
+	 	$options[] = array(
+			'name' => __('开发者模式', 'options_framework_theme'),
+			'desc' =>'勾选开发者模式（不懂代码请无视）',
+			'id' => 'is_developer',
+			'std' => '0',
+			'type' => 'checkbox');
+
+		$options[] = array(
+		'name' => __('日常维护', 'options_framework_theme'),
+		'icon' => 'retweet',
+		'type' => 'heading');
+
+		$options[] = array(
+			'name' => __('暂停网站', 'options_framework_theme'),
+			'desc' =>'勾选暂停网站（勾选后通知内容将会被显示，普通用户只会看到通知字样,管理员可以正常访问）',
+			'id' => 'is_c',
+			'std' => '0',
+			'type' => 'checkbox');
+
+		$options[] = array(
+			'name' => __('是否显示通知', 'options_framework_theme'),
+			'desc' =>'勾选启用通知',
+			'id' => 'is_act',
+			'std' => '0',
+			'type' => 'checkbox');
+
+	    $options[] = array(
+			'name' => __('通知样式', 'options_framework_theme'),
+			'desc' => __('选择通知样式', 'options_framework_theme'),
+			'id' => 'nstata',
+			'std' => 'info',
+			'type' => 'select',
+			'class' => 'mini', //mini, tiny, small
+			'options' => $notice_array);
+
+	    $options[] = array(
+			'name' => __('显示时间', 'options_framework_theme'),
+			'id' => 'ntime',
+			'std' => '8000',
+			'type' => 'text');
+
+		$options[] = array(
+			'name' => __('通知内容', 'options_framework_theme'),
+			'desc' => '如果想显示通知，请勿使用富文本。（富文本为暂停使用）',
+			'id' => 'act',
+			'type' => 'editor',
+			'settings' => $wp_editor_settings );
+
+		$options[] = array(
+			'name' => __('喜欢\分享\打赏', 'options_framework_theme'),
+			'icon' => 'qrcode',
+			'type' => 'heading');
+
+		$options[] = array(
+			'name' => __('启用喜欢\分享组件', 'options_framework_theme'),
+			'desc' => __('勾选启用喜欢\分享', 'options_framework_theme'),
+			'id' => 'is_like',
+			'std' => '0',
+			'type' => 'checkbox');
+
+		$options[] = array(
+			'name' => __('是否启用打赏', 'options_framework_theme'),
+			'desc' =>'勾选启用打赏',
+			'id' => 'is_reward',
+			'std' => '0',
+			'type' => 'checkbox');
+
+		$options[] = array(
+			'name' => __('微信二维码', 'options_framework_theme'),
+			'desc' => __('', 'options_framework_theme'),
+			'id' => 'wzxn_reward',
+			'type' => 'upload');
+
+		$options[] = array(
+			'name' => __('支付宝二维码', 'options_framework_theme'),
+			'desc' => __('', 'options_framework_theme'),
+			'id' => 'vifubk_reward',
+			'type' => 'upload');
+
+		$options[] = array(
+			'name' => __('自定义', 'options_framework_theme'),
+			'icon' => 'object-group',
+			'type' => 'heading');
+
+		$options[] = array(
+		'name' => __('自定义背景', 'options_framework_theme'),
+		'desc' => __('仅支持平铺的小图', 'options_framework_theme'),
+		'id' => 'bgimg',
+		'type' => 'upload');
+
+		$options[] = array(
+			'name' => __('404页', 'options_framework_theme'),
+			'desc' => '在此可以自定义404页面',
+			'id' => 'diy_404',
+			'std' => '<p class="_404">没发现什么...</p>',
+			'type' => 'editor',
+			'settings' => $wp_editor_settings );
+
+		$options[] = array(
+			'name' => __('加载动画', 'options_framework_theme'),
+			'desc' => '自定义加载动画',
+			'id' => 'diy_loading',
+			'std' => '<img src="'.get_template_directory_uri().'/img/box.gif">',
+			'type' => 'editor',
+			'settings' => $wp_editor_settings );
+
+		$options[] = array(
+			'name' => __('评论文字显示', 'options_framework_theme'),
+			'desc' => '',
+			'id' => 'diy_comments',
+			'std' => '评论',
+			'type' => 'text');
+		$options[] = array(
+			'name' => __('发表评论 文字显示', 'options_framework_theme'),
+			'desc' => '',
+			'id' => 'diy_published_comments',
+			'std' => '发表评论',
+			'type' => 'text');
+		$options[] = array(
+			'name' => __('无评论提示文字显示', 'options_framework_theme'),
+			'desc' => '',
+			'id' => 'diy_no_comments',
+			'std' => '还没有任何评论，你来说两句吧',
+			'type' => 'text');
+	}
+	return $options;
+}
